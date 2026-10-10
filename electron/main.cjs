@@ -42,10 +42,10 @@ function registerShortcuts(next = shortcuts) {
   }
 }
 function createWindow() {
-  mainWindow = new BrowserWindow({ width: 1440, height: 980, minWidth: 1040, minHeight: 720, backgroundColor: '#0c1014', title: 'MTO TimeStretch', autoHideMenuBar: true,
+  mainWindow = new BrowserWindow({ width: 1440, height: 980, minWidth: 1040, minHeight: 720, backgroundColor: '#0c1014', title: 'MTO TimeStretch', icon: path.join(__dirname, app.isPackaged ? '../web-dist/mto-icon.png' : '../public/mto-icon.png'), autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   if (!app.isPackaged) mainWindow.loadURL('http://127.0.0.1:5173');
-  else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+  else mainWindow.loadFile(path.join(__dirname, '../web-dist/index.html'));
 }
 ipcMain.handle('audio:open', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { title: 'Open audio', properties: ['openFile'], filters: [{ name: 'Audio', extensions: ['mp3', 'wav'] }] });

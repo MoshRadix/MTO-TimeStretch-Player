@@ -4,12 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0c1014" />
+    <link rel="icon" type="image/png" href="./mto-icon.png" />
     <title>MTO TimeStretch</title>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><b>MTO</b><small>TIME STRETCH</small></div></div>
+        <div class="brand"><div class="brand-mark"><img src="./mto-icon.png" alt="" aria-hidden="true" /></div><div><b>MTO</b><small>TIME STRETCH</small></div></div>
         <div class="library-label">YOUR STUDIO</div>
         <div class="side-control-section"><div class="library-label">PLAYER CONTROLS</div><div id="side-player-controls"></div></div>
         <div class="side-divider"></div>
@@ -43,7 +44,7 @@
         <section class="transcription-page" id="transcription-page">
           <div class="page-heading"><div><h1>Audio <em>transcription.</em></h1><p>Write and edit your transcription. Changes are saved automatically on this device.</p></div></div>
           <section class="transcription-card">
-            <div class="transcription-toolbar"><div class="transcription-font-label"><span class="control-dot mint"></span> FARUMA FONT</div><label class="font-size-control">Font size <input id="transcription-font-size" type="number" min="8" max="72" value="13" aria-label="Transcription font size"> <span>px</span></label><div class="transcription-actions"><button class="secondary-btn" id="download-transcription">Download .txt</button><button class="secondary-btn clear-btn" id="clear-transcription">Clear text</button></div></div>
+            <div class="transcription-toolbar"><div class="transcription-font-label"><span class="control-dot mint"></span><span id="transcription-font-name">FARUMA FONT</span></div><div class="transcription-language" role="group" aria-label="Transcription language"><button id="language-dv" class="language-option active" type="button" aria-pressed="true" title="Type Dhivehi with phonetic QWERTY keys">Dhivehi</button><button id="language-en" class="language-option" type="button" aria-pressed="false">English</button></div><label class="font-size-control">Font size <input id="transcription-font-size" type="number" min="8" max="72" value="13" aria-label="Transcription font size"> <span>px</span></label><div class="transcription-actions"><button class="secondary-btn" id="download-transcription">Download .txt</button><button class="secondary-btn clear-btn" id="clear-transcription">Clear text</button></div></div>
             <textarea id="transcription-text" class="transcription-text" spellcheck="false" placeholder="Start typing your transcription…" aria-label="Audio transcription"></textarea>
             <div class="transcription-footer"><span id="transcription-save-status">Saved on this device</span><span>UTF-8 text</span></div>
           </section>

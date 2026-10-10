@@ -15,11 +15,35 @@ let progressFrame = 0;
 let lastPositionSavedAt = 0;
 const transcriptionText = $('#transcription-text');
 const transcriptionFontSize = $('#transcription-font-size');
+let transcriptionLanguage = 'dv';
+const phoneticThaana = {
+  q: 'ް', w: 'އ', e: 'ެ', r: 'ރ', t: 'ތ', y: 'ޔ', u: 'ު', i: 'ި', o: 'ޮ', p: 'ޕ',
+  a: 'ަ', s: 'ސ', d: 'ދ', f: 'ފ', g: 'ގ', h: 'ހ', j: 'ޖ', k: 'ކ', l: 'ލ',
+  z: 'ޒ', x: '×', c: 'ޗ', v: 'ވ', b: 'ބ', n: 'ނ', m: 'މ',
+  Q: 'ޤ', W: 'ޢ', E: 'ޭ', R: 'ޜ', T: 'ޓ', Y: 'ޠ', U: 'ޫ', I: 'ީ', O: 'ޯ', P: '÷',
+  A: 'ާ', S: 'ށ', D: 'ޑ', F: 'ﷲ', G: 'ޣ', H: 'ޙ', J: 'ޛ', K: 'ޚ', L: 'ޅ',
+  Z: 'ޡ', X: 'ޘ', C: 'ޝ', V: 'ޥ', B: 'ޞ', N: 'ޏ', M: '>',
+};
+function setTranscriptionLanguage(language, save = true) {
+  transcriptionLanguage = language === 'en' ? 'en' : 'dv';
+  const isDhivehi = transcriptionLanguage === 'dv';
+  transcriptionText.dataset.language = transcriptionLanguage;
+  transcriptionText.dir = isDhivehi ? 'rtl' : 'ltr';
+  transcriptionText.lang = isDhivehi ? 'dv' : 'en';
+  transcriptionText.placeholder = isDhivehi ? 'ލިޔުން ފަށާ...' : 'Start typing your transcription…';
+  $('#transcription-font-name').textContent = isDhivehi ? 'FARUMA FONT' : 'ARIAL FONT';
+  $('#language-dv').classList.toggle('active', isDhivehi);
+  $('#language-en').classList.toggle('active', !isDhivehi);
+  $('#language-dv').setAttribute('aria-pressed', String(isDhivehi));
+  $('#language-en').setAttribute('aria-pressed', String(!isDhivehi));
+  if (save) localStorage.setItem('mto-transcription-language', transcriptionLanguage);
+}
 function loadTranscription() {
   transcriptionText.value = localStorage.getItem('mto-transcription') || '';
   const size = Number(localStorage.getItem('mto-transcription-font-size')) || 13;
   transcriptionFontSize.value = String(Math.max(8, Math.min(72, size)));
   transcriptionText.style.fontSize = `${transcriptionFontSize.value}px`;
+  setTranscriptionLanguage(localStorage.getItem('mto-transcription-language') || 'dv', false);
 }
 function saveTranscription() {
   try { localStorage.setItem('mto-transcription', transcriptionText.value); $('#transcription-save-status').textContent = 'Saved on this device'; }
@@ -39,7 +63,7 @@ function savePlaybackPosition(force = false) {
 
 function drawWaveform() {
   drawWaveformOn(waveform, waveCtx, $('#wave-empty'), '#35434a');
-  drawWaveformOn(waveformProgress, waveProgressCtx, $('#wave-empty'), '#80e2c3');
+  drawWaveformOn(waveformProgress, waveProgressCtx, $('#wave-empty'), '#bd43f5');
 }
 function drawWaveformOn(canvas, ctx, empty, barColor) {
   const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
@@ -52,7 +76,7 @@ function drawWaveformOn(canvas, ctx, empty, barColor) {
     let peak = 0; const start = i * step;
     for (let j = 0; j < step; j += 4) peak = Math.max(peak, Math.abs(data[start + j] || 0));
     const envelope = Math.max(0.1, Math.min(1, peak * 2.5)); const maxBarHeight = Math.max(1, height - 10); const barHeight = Math.min(maxBarHeight, 5 + envelope * (height * 0.72)); const x = (i / barCount) * width;
-    ctx.fillStyle = barColor; ctx.globalAlpha = barColor === '#80e2c3' ? 0.96 : 0.84;
+    ctx.fillStyle = barColor; ctx.globalAlpha = barColor === '#bd43f5' ? 0.96 : 0.84;
     ctx.beginPath(); ctx.roundRect(x, mid - barHeight / 2, 2, barHeight, Math.min(2, barHeight / 2)); ctx.fill();
   }
   ctx.globalAlpha = 1;
@@ -205,6 +229,16 @@ $('#side-player-controls').append($('.controls-row'));
 $('.breadcrumb strong').textContent = 'TRANSCRIPTION';
 paintDials(); drawWaveform(); loadSettings(); loadTranscription();
 transcriptionText.addEventListener('input', saveTranscription);
+transcriptionText.addEventListener('keydown', (event) => {
+  if (transcriptionLanguage !== 'dv' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.key.length !== 1) return;
+  const thaana = phoneticThaana[event.key];
+  if (!thaana) return;
+  event.preventDefault();
+  transcriptionText.setRangeText(thaana, transcriptionText.selectionStart, transcriptionText.selectionEnd, 'end');
+  transcriptionText.dispatchEvent(new Event('input', { bubbles: true }));
+});
+$('#language-dv').addEventListener('click', () => setTranscriptionLanguage('dv'));
+$('#language-en').addEventListener('click', () => setTranscriptionLanguage('en'));
 transcriptionFontSize.addEventListener('input', () => { const size = Math.max(8, Math.min(72, Number(transcriptionFontSize.value) || 13)); transcriptionText.style.fontSize = `${size}px`; localStorage.setItem('mto-transcription-font-size', String(size)); });
 $('#speed-slider').addEventListener('input', (event) => setSpeed(Number(event.target.value)));
 $('#pitch-slider').addEventListener('input', (event) => setPitch(Number(event.target.value)));
