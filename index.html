@@ -21,7 +21,7 @@
 
       <main class="main-content">
         <header class="topbar"><div class="breadcrumb">STUDIO <span>/</span> <strong>PLAYER</strong></div><div class="top-actions"><div class="status-pill"><i></i><span>READY TO LISTEN</span></div><button class="icon-btn" id="top-settings" aria-label="Settings">&#9881;</button><div class="avatar">M</div></div></header>
-        <div class="player-taskbar" id="player-taskbar" aria-label="Audio player controls"></div>
+        <div class="player-taskbar" id="player-taskbar" aria-label="Audio player controls"><div class="load-progress" id="load-progress" hidden role="status" aria-live="polite"><div class="load-progress-head"><span id="load-progress-label">Loading audio</span><span id="load-progress-value">0%</span></div><div class="load-progress-track"><div id="load-progress-bar"></div></div></div></div>
         <section class="workspace">
           <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL PRACTICE ROOM</div><h1>Listen <em>closer.</em></h1><p>Take your time. Every note, every nuance, at your pace.</p></div></div>
 
@@ -53,6 +53,7 @@
     </div>
     <div class="settings-overlay" id="settings-overlay"><section class="settings-modal"><div class="modal-header"><div><div class="eyebrow">PREFERENCES</div><h2>Your shortcuts</h2></div><button class="icon-btn" id="close-settings">×</button></div><p class="modal-copy">Set global keys that work even when MTO is in the background.</p><div class="shortcut-list"><label>Play / pause <input data-shortcut="playPause" value="Alt+Space" readonly></label><label>Seek backward <input data-shortcut="seekBackward" value="Alt+Left" readonly></label><label>Seek forward <input data-shortcut="seekForward" value="Alt+Right" readonly></label><label>Speed down <input data-shortcut="speedDown" value="Alt+Down" readonly></label><label>Speed up <input data-shortcut="speedUp" value="Alt+Up" readonly></label><label>Pitch down <input data-shortcut="pitchDown" value="Ctrl+Alt+Left" readonly></label><label>Pitch up <input data-shortcut="pitchUp" value="Ctrl+Alt+Right" readonly></label></div><div class="modal-footer"><span id="shortcut-message">Click a shortcut, then press your keys</span><button class="save-btn" id="save-settings">Save shortcuts</button></div></section></div>
     <div class="toast" id="toast"></div>
+    <audio id="audio-stream" preload="metadata"></audio>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

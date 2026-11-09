@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('mto', {
   openAudio: () => ipcRenderer.invoke('audio:open'),
   restoreAudio: () => ipcRenderer.invoke('audio:restore'),
+  readAudioChunk: (filePath, offset, length) => ipcRenderer.invoke('audio:read-chunk', { filePath, offset, length }),
   savePlaybackPosition: (position) => ipcRenderer.send('playback:position', position),
   getShortcuts: () => ipcRenderer.invoke('settings:get'),
   saveShortcuts: (shortcuts) => ipcRenderer.invoke('settings:save', shortcuts),

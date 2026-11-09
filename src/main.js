@@ -1,9 +1,10 @@
 import { SoundTouchNode } from '@soundtouchjs/audio-worklet';
 import soundTouchProcessorUrl from '@soundtouchjs/audio-worklet/processor?url';
+import waveformProcessorUrl from './waveform-processor.js?url&no-inline';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { buffer: null, name: '', context: null, audioSetup: null, loading: false, loadId: 0, restoring: false, source: null, stretch: null, clarityNodes: null, clarity: false, playing: false, loop: false, offset: 0, startedAt: 0, speed: 1, pitch: 0, volume: 0.8, shortcuts: {} };
+const state = { buffer: null, waveformPeaks: null, waveformAnalysis: null, bookmarks: [], audioPath: '', name: '', context: null, audioSetup: null, loading: false, loadId: 0, restoring: false, source: null, media: $('#audio-stream'), mediaSource: null, streaming: false, stretch: null, clarityNodes: null, clarity: false, playing: false, loop: false, offset: 0, startedAt: 0, speed: 1, pitch: 0, volume: 0.8, shortcuts: {} };
 const waveform = $('#waveform');
 const waveCtx = waveform.getContext('2d');
 const waveformProgress = $('#waveform-progress');
@@ -13,6 +14,7 @@ let scrubWasPlaying = false;
 let recordingShortcut = null;
 let progressFrame = 0;
 let lastPositionSavedAt = 0;
+const waveformPeakCount = 512;
 const transcriptionText = $('#transcription-text');
 const transcriptionFontSize = $('#transcription-font-size');
 let transcriptionLanguage = 'dv';
@@ -38,27 +40,120 @@ function setTranscriptionLanguage(language, save = true) {
   $('#language-en').setAttribute('aria-pressed', String(!isDhivehi));
   if (save) localStorage.setItem('mto-transcription-language', transcriptionLanguage);
 }
-function loadTranscription() {
-  transcriptionText.value = localStorage.getItem('mto-transcription') || '';
+function transcriptionStorageKey(filePath) { return `mto-transcription:${filePath}`; }
+function loadTranscription(filePath = state.audioPath) {
+  const savedText = filePath
+    ? localStorage.getItem(transcriptionStorageKey(filePath))
+    : localStorage.getItem('mto-transcription');
+  transcriptionText.value = savedText || '';
   const size = Number(localStorage.getItem('mto-transcription-font-size')) || 13;
   transcriptionFontSize.value = String(Math.max(8, Math.min(72, size)));
   transcriptionText.style.fontSize = `${transcriptionFontSize.value}px`;
   setTranscriptionLanguage(localStorage.getItem('mto-transcription-language') || 'dv', false);
 }
 function saveTranscription() {
-  try { localStorage.setItem('mto-transcription', transcriptionText.value); $('#transcription-save-status').textContent = 'Saved on this device'; }
+  try {
+    const key = state.audioPath ? transcriptionStorageKey(state.audioPath) : 'mto-transcription';
+    localStorage.setItem(key, transcriptionText.value);
+    $('#transcription-save-status').textContent = 'Saved on this device';
+  }
   catch { $('#transcription-save-status').textContent = 'Could not save on this device'; }
 }
 
 function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove('show'), 2400); }
+function updateLoadProgress(label, percent = null) {
+  const panel = $('#load-progress'); const value = $('#load-progress-value'); const bar = $('#load-progress-bar');
+  panel.hidden = false; $('#load-progress-label').textContent = label;
+  if (percent === null) { value.textContent = '…'; bar.classList.add('indeterminate'); bar.style.width = ''; }
+  else { const safePercent = Math.max(0, Math.min(100, percent)); value.textContent = `${Math.round(safePercent)}%`; bar.classList.remove('indeterminate'); bar.style.width = `${safePercent}%`; }
+}
+function finishLoadProgress() { $('#load-progress').hidden = true; $('#load-progress-bar').classList.remove('indeterminate'); }
 function formatTime(time) { if (!Number.isFinite(time)) return '00:00'; const s = Math.max(0, Math.floor(time)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
-function currentTime() { if (!state.buffer) return 0; return state.playing ? Math.min(state.buffer.duration, state.offset + (state.context.currentTime - state.startedAt) * state.speed) : state.offset; }
+function audioDuration() { return state.buffer?.duration || state.media?.duration || 0; }
+function hasAudio() { return Boolean(state.buffer || (state.streaming && state.media?.src)); }
+function currentTime() { if (!hasAudio()) return 0; return state.streaming ? (state.media?.currentTime || 0) : (state.playing ? Math.min(state.buffer.duration, state.offset + (state.context.currentTime - state.startedAt) * state.speed) : state.offset); }
 function savePlaybackPosition(force = false) {
-  if (!state.buffer || !window.mto?.savePlaybackPosition) return;
+  if (!hasAudio() || !window.mto?.savePlaybackPosition) return;
   const now = performance.now();
   if (!force && now - lastPositionSavedAt < 1000) return;
   lastPositionSavedAt = now;
   try { window.mto.savePlaybackPosition(currentTime()); } catch {}
+}
+
+function bookmarksStorageKey(filePath) { return `mto-bookmarks:${filePath}`; }
+function loadBookmarks(filePath, duration) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(bookmarksStorageKey(filePath)) || '[]');
+    if (!Array.isArray(saved)) throw new Error('Saved bookmarks are not a list');
+    return [...new Set(saved.filter((position) => Number.isFinite(position) && position >= 0 && position <= duration))].sort((a, b) => a - b);
+  } catch (error) {
+    console.error('Could not load audio bookmarks:', error);
+    toast('Could not load bookmarks for this audio.');
+    return [];
+  }
+}
+function saveBookmarks() {
+  if (!state.audioPath) return;
+  try {
+    localStorage.setItem(bookmarksStorageKey(state.audioPath), JSON.stringify(state.bookmarks));
+  } catch (error) {
+    console.error('Could not save audio bookmarks:', error);
+    toast('Could not save bookmarks on this device.');
+  }
+}
+function renderBookmarks() {
+  const list = $('#wave-bookmarks');
+  const addButton = $('#bookmark-add');
+  if (!list || !addButton) return;
+  addButton.disabled = !state.audioPath;
+  list.replaceChildren();
+  for (const [index, position] of state.bookmarks.entries()) {
+    const item = document.createElement('div');
+    item.className = 'wave-bookmark-item';
+    const jump = document.createElement('button');
+    jump.className = 'wave-bookmark-jump';
+    jump.type = 'button';
+    jump.textContent = formatTime(position);
+    jump.title = `Jump to ${formatTime(position)}`;
+    jump.addEventListener('click', () => seekTo(position));
+    const remove = document.createElement('button');
+    remove.className = 'wave-bookmark-delete';
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.title = `Delete bookmark at ${formatTime(position)}`;
+    remove.setAttribute('aria-label', `Delete bookmark at ${formatTime(position)}`);
+    remove.addEventListener('click', () => {
+      state.bookmarks.splice(index, 1);
+      saveBookmarks();
+      renderBookmarks();
+    });
+    item.append(jump, remove);
+    list.append(item);
+  }
+  document.querySelectorAll('.wave-bookmark-marker').forEach((marker) => marker.remove());
+  const duration = audioDuration();
+  if (!duration) return;
+  const waveformWrap = $('#wave-hit');
+  for (const position of state.bookmarks) {
+    const marker = document.createElement('span');
+    marker.className = 'wave-bookmark-marker';
+    marker.style.left = `${Math.min(100, position / duration * 100)}%`;
+    marker.title = `Bookmark at ${formatTime(position)}`;
+    marker.setAttribute('aria-hidden', 'true');
+    waveformWrap.append(marker);
+  }
+}
+function addBookmark() {
+  if (!state.audioPath) return;
+  const position = Math.max(0, Math.min(audioDuration(), currentTime()));
+  if (state.bookmarks.some((bookmark) => Math.abs(bookmark - position) < 0.1)) {
+    toast('A bookmark already exists at this position.');
+    return;
+  }
+  state.bookmarks.push(position);
+  state.bookmarks.sort((a, b) => a - b);
+  saveBookmarks();
+  renderBookmarks();
 }
 
 function drawWaveform() {
@@ -69,21 +164,127 @@ function drawWaveformOn(canvas, ctx, empty, barColor) {
   const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, rect.width * dpr); canvas.height = Math.max(1, rect.height * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const width = rect.width, height = rect.height; ctx.clearRect(0, 0, width, height);
-  if (!state.buffer || !width || !height) { empty.classList.remove('hidden'); return; }
+  if (!width || !height) { empty.classList.remove('hidden'); return; }
+  if (!state.buffer && !state.streaming) { empty.classList.remove('hidden'); return; }
   empty.classList.add('hidden');
-  const data = state.buffer.getChannelData(0); const barCount = Math.max(1, Math.floor(width / 4)); const step = Math.max(1, Math.floor(data.length / barCount)); const mid = height / 2;
+  const barCount = Math.max(1, Math.floor(width / 4)); const mid = height / 2;
+  const peaks = state.waveformPeaks;
+  if (!peaks) return;
   for (let i = 0; i < barCount; i++) {
-    let peak = 0; const start = i * step;
-    for (let j = 0; j < step; j += 4) peak = Math.max(peak, Math.abs(data[start + j] || 0));
-    const envelope = Math.max(0.1, Math.min(1, peak * 2.5)); const maxBarHeight = Math.max(1, height - 10); const barHeight = Math.min(maxBarHeight, 5 + envelope * (height * 0.72)); const x = (i / barCount) * width;
+    const peak = peaks[Math.min(peaks.length - 1, Math.floor(i * peaks.length / barCount))];
+    const barHeight = Math.max(1, Math.min(height - 10, Math.min(1, peak * 2.5) * (height - 10))); const x = (i / barCount) * width;
     ctx.fillStyle = barColor; ctx.globalAlpha = barColor === '#bd43f5' ? 0.96 : 0.84;
     ctx.beginPath(); ctx.roundRect(x, mid - barHeight / 2, 2, barHeight, Math.min(2, barHeight / 2)); ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
 
+function getBufferWaveformPeaks(buffer) {
+  const peaks = new Float32Array(waveformPeakCount);
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+  for (let i = 0; i < peaks.length; i++) {
+    const start = Math.floor(i * buffer.length / peaks.length);
+    const end = Math.floor((i + 1) * buffer.length / peaks.length);
+    let peak = 0;
+    for (const channel of channels) {
+      for (let sample = start; sample < end; sample++) peak = Math.max(peak, Math.abs(channel[sample]));
+    }
+    peaks[i] = peak;
+  }
+  return peaks;
+}
+
+function stopWaveformAnalysis() {
+  const analysis = state.waveformAnalysis;
+  if (!analysis) return;
+  state.waveformAnalysis = null;
+  analysis.audio.pause();
+  analysis.audio.removeAttribute('src');
+  analysis.audio.load();
+  analysis.audio.removeEventListener('ended', analysis.onEnded);
+  analysis.audio.removeEventListener('error', analysis.onError);
+  if (analysis.processor) {
+    analysis.processor.port.onmessage = null;
+    analysis.processor.port.close();
+    analysis.processor.disconnect();
+  }
+  analysis.source.disconnect();
+  analysis.context.close().catch((error) => console.error('Could not close waveform analyzer:', error));
+}
+
+async function analyzeStreamingWaveform(url, duration, loadId) {
+  stopWaveformAnalysis();
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.crossOrigin = 'anonymous';
+  const context = new AudioContext();
+  const source = context.createMediaElementSource(audio);
+  const peaks = new Float32Array(waveformPeakCount);
+  let previousTime = 0;
+  let lastDraw = 0;
+  const analysis = { audio, context, source, processor: null, onEnded: null, onError: null };
+  state.waveformPeaks = peaks;
+  state.waveformAnalysis = analysis;
+  try {
+    await context.audioWorklet.addModule(waveformProcessorUrl);
+    if (state.waveformAnalysis !== analysis || state.loadId !== loadId) {
+      return;
+    }
+    const processor = new AudioWorkletNode(context, 'mto-waveform', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 2,
+      channelCountMode: 'max',
+    });
+    analysis.processor = processor;
+    source.connect(processor);
+    processor.connect(context.destination);
+    processor.port.onmessage = (event) => {
+      if (state.waveformAnalysis !== analysis || state.loadId !== loadId) return;
+      const currentTime = Math.min(duration, audio.currentTime);
+      if (!Number.isFinite(currentTime)) return;
+      const peak = event.data;
+      if (currentTime > previousTime) {
+        const firstBin = Math.min(peaks.length - 1, Math.floor(previousTime / duration * peaks.length));
+        const lastBin = Math.min(peaks.length - 1, Math.floor(currentTime / duration * peaks.length));
+        for (let bin = firstBin; bin <= lastBin; bin++) peaks[bin] = Math.max(peaks[bin], peak);
+        previousTime = currentTime;
+      }
+      if (performance.now() - lastDraw >= 200) {
+        lastDraw = performance.now();
+        drawWaveform();
+        $('#track-meta').textContent = `${$('#track-meta').textContent.replace(/ · waveform \d+%$/, '')} · waveform ${Math.floor(currentTime / duration * 100)}%`;
+      }
+    };
+    analysis.onEnded = () => {
+      if (state.waveformAnalysis !== analysis) return;
+      stopWaveformAnalysis();
+      drawWaveform();
+      $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
+    };
+    analysis.onError = () => {
+      console.error('Could not analyze the streamed audio waveform:', audio.error);
+      if (state.waveformAnalysis === analysis) stopWaveformAnalysis();
+      $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
+    };
+    audio.addEventListener('ended', analysis.onEnded, { once: true });
+    audio.addEventListener('error', analysis.onError, { once: true });
+    audio.playbackRate = 8;
+    audio.preservesPitch = false;
+    audio.src = url;
+    audio.load();
+    await context.resume();
+    await audio.play();
+  } catch (error) {
+    if (state.waveformAnalysis === analysis) stopWaveformAnalysis();
+    console.error('Could not start waveform analysis:', error);
+    $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
+  }
+}
+
 function drawProgress() {
-  const time = currentTime(); const duration = state.buffer?.duration || 0; const ratio = duration ? time / duration : 0;
+  const time = currentTime(); const duration = audioDuration(); const ratio = duration ? time / duration : 0;
   $('#wave-playhead').style.left = `${ratio * 100}%`; $('#wave-progress').style.clipPath = `inset(0 ${100 - ratio * 100}% 0 0)`; $('#elapsed').textContent = formatTime(time);
   savePlaybackPosition();
   if (progressFrame) cancelAnimationFrame(progressFrame);
@@ -94,13 +295,13 @@ function paintDials() {
   $('#speed-slider').value = String(state.speed); $('#pitch-slider').value = String(state.pitch);
   if (state.stretch) state.stretch.playbackRate.setTargetAtTime(state.speed, state.context.currentTime, 0.02);
   if (state.source) state.source.playbackRate.setTargetAtTime(state.speed, state.context.currentTime, 0.02);
+  if (state.streaming && state.media) state.media.playbackRate = state.speed;
   if (state.stretch) state.stretch.pitchSemitones.setTargetAtTime(state.pitch, state.context.currentTime, 0.04);
 }
 function setSpeed(value) { state.speed = Math.round(Math.max(0.5, Math.min(2, value)) * 100) / 100; paintDials(); }
 function setPitch(value) { state.pitch = Math.max(-12, Math.min(12, Math.round(value))); paintDials(); }
 
-function makeClarityChain() {
-  const input = state.stretch || state.context.createGain();
+function makeClarityChain(input = state.stretch || state.context.createGain()) {
   const highpass = state.context.createBiquadFilter(); highpass.type = 'highpass'; highpass.frequency.value = state.clarity ? 115 : 25;
   const presence = state.context.createBiquadFilter(); presence.type = 'peaking'; presence.frequency.value = 2800; presence.Q.value = 0.8; presence.gain.value = state.clarity ? 4.5 : 0;
   const compressor = state.context.createDynamicsCompressor(); compressor.threshold.value = -24; compressor.knee.value = 18; compressor.ratio.value = state.clarity ? 2.2 : 1; compressor.attack.value = 0.012; compressor.release.value = 0.22;
@@ -127,12 +328,13 @@ async function ensureAudio(resumeContext = true) {
       throw error;
     });
   }
-  await state.audioSetup;
+  if (state.audioSetup) await state.audioSetup;
   if (resumeContext && state.context.state === 'suspended') await state.context.resume();
   if (resumeContext && state.context.state !== 'running') throw new Error(`Audio context is ${state.context.state}`);
 }
 function stopSource() {
   if (state.source) { try { state.source.onended = null; state.source.stop(); } catch {} try { state.source.disconnect(); } catch {} }
+  if (state.mediaSource) { try { state.mediaSource.disconnect(); } catch {} }
   if (state.stretch) { try { state.stretch.disconnect(); } catch {} }
   for (const node of Object.values(state.clarityNodes || {})) { try { node.disconnect(); } catch {} }
   state.source = null; state.stretch = null; state.clarityNodes = null;
@@ -140,30 +342,40 @@ function stopSource() {
 function createPlaybackGraph() {
   stopSource();
   try {
-    state.stretch = new SoundTouchNode({ context: state.context });
-    const source = state.context.createBufferSource(); source.buffer = state.buffer; source.loop = state.loop; source.playbackRate.value = state.speed;
-    state.source = source; source.connect(state.stretch); state.stretch.playbackRate.value = state.speed; state.stretch.pitchSemitones.value = state.pitch;
-    makeClarityChain();
-    source.onended = () => { if (state.playing && !state.loop) { state.playing = false; state.offset = 0; savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'TRACK ENDED'; $('#track-state-dot').classList.remove('playing'); drawProgress(); drawWaveform(); } };
+    if (state.streaming) {
+      state.media.loop = state.loop; state.media.playbackRate = state.speed; state.media.preservesPitch = false;
+      if (!state.mediaSource) state.mediaSource = state.context.createMediaElementSource(state.media);
+      state.media.volume = 1;
+      state.stretch = new SoundTouchNode({ context: state.context }); state.mediaSource.connect(state.stretch); makeClarityChain();
+    } else {
+      state.stretch = new SoundTouchNode({ context: state.context });
+      const source = state.context.createBufferSource(); source.buffer = state.buffer; source.loop = state.loop; source.playbackRate.value = state.speed;
+      state.source = source; source.connect(state.stretch);
+      makeClarityChain();
+      source.onended = () => handleEnded();
+    }
+    if (state.stretch) { state.stretch.playbackRate.value = state.speed; state.stretch.pitchSemitones.value = state.pitch; }
   } catch (error) { stopSource(); throw error; }
 }
+function handleEnded() { if (state.playing && !state.loop) { state.playing = false; state.offset = 0; savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'TRACK ENDED'; $('#track-state-dot').classList.remove('playing'); drawProgress(); drawWaveform(); } }
 async function play(allowDuringLoad = false) {
   if (state.loading && !allowDuringLoad) return;
-  if (!state.buffer) { await openAudio(); return; }
+  if (!hasAudio()) { await openAudio(); return; }
   if (state.playing) return;
   await ensureAudio(); if (state.playing) return;
-  if (state.offset >= state.buffer.duration) state.offset = 0;
-  try { createPlaybackGraph(); state.startedAt = state.context.currentTime; state.source.start(0, state.offset); state.playing = true; }
+  if (state.offset >= audioDuration()) state.offset = 0;
+  try { createPlaybackGraph(); state.startedAt = state.context?.currentTime || 0; if (state.streaming) { state.media.currentTime = state.offset; state.media.onended = handleEnded; await state.media.play(); } else state.source.start(0, state.offset); state.playing = true; }
   catch (error) { state.playing = false; stopSource(); throw error; }
   $('#play-symbol').textContent = '\u2016'; $('#play-btn').classList.add('is-playing'); $('#play-btn').title = 'Pause'; $('#play-btn').setAttribute('aria-label', 'Pause'); $('#track-state-label').textContent = 'NOW PLAYING'; $('#track-state-dot').classList.add('playing'); drawProgress();
 }
 function pause(savePosition = true) {
   if (!state.playing) return;
-  state.offset = currentTime(); state.playing = false; stopSource(); if (savePosition) savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'PAUSED'; $('#track-state-dot').classList.remove('playing'); drawWaveform(); drawProgress();
+  state.offset = currentTime(); state.playing = false; if (state.streaming) state.media.pause(); stopSource(); if (savePosition) savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'PAUSED'; $('#track-state-dot').classList.remove('playing'); drawWaveform(); drawProgress();
 }
 async function togglePlay() { try { if (state.playing) pause(); else await play(); } catch (error) { console.error(error); toast('Playback could not start. Try reopening the audio file.'); } }
 async function seekTo(value) {
-  if (!state.buffer) return; state.offset = Math.max(0, Math.min(state.buffer.duration, value));
+  if (!hasAudio()) return; state.offset = Math.max(0, Math.min(audioDuration(), value));
+  if (state.streaming) state.media.currentTime = state.offset;
   const resume = state.playing; if (resume) { state.playing = false; stopSource(); }
   drawWaveform(); drawProgress(); savePlaybackPosition(true); if (resume) await togglePlay();
 }
@@ -182,23 +394,59 @@ async function openAudio(restoredFile = null, restorePosition = 0) {
   try {
     const file = isRestore ? restoredFile : await window.mto.openAudio();
     if (!file || loadId !== state.loadId) return;
-    await ensureAudio(false);
-    if (loadId !== state.loadId) return;
-    pause(false); const bytes = file.bytes instanceof Uint8Array ? file.bytes : new Uint8Array(file.bytes.data || file.bytes);
-    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); const decoded = await state.context.decodeAudioData(copy);
-    if (loadId !== state.loadId) return;
-    state.buffer = decoded; state.name = file.name; state.offset = Math.max(0, Math.min(state.buffer.duration, Number(restorePosition) || 0));
-    $('#track-title').textContent = file.name.replace(/\.(mp3|wav)$/i, ''); $('#track-meta').textContent = `${file.name.toLowerCase().endsWith('.wav') ? 'WAV' : 'MP3'} · ${formatTime(state.buffer.duration)} · ${Math.round(state.buffer.sampleRate / 1000)} kHz`;
-    $('#duration').textContent = formatTime(state.buffer.duration); $('#end-time').textContent = formatTime(state.buffer.duration); $('#mid-time').textContent = formatTime(state.buffer.duration / 2);
+    const totalBytes = Number(file.size);
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) throw new Error('Audio file has no readable data');
+    const isLargeFile = totalBytes >= 64 * 1024 * 1024;
+    stopWaveformAnalysis();
+    state.waveformPeaks = null;
+    state.audioPath = '';
+    state.bookmarks = [];
+    renderBookmarks();
+    updateLoadProgress('Preparing audio…', 0);
+    pause(false); state.buffer = null; state.streaming = false; state.media.pause(); state.media.removeAttribute('src'); state.media.load();
+    if (isLargeFile) {
+      updateLoadProgress('Opening large audio stream…', null);
+      await new Promise((resolve, reject) => { const onReady = () => { cleanup(); resolve(); }; const onError = () => { cleanup(); reject(new Error('Audio stream could not be opened')); }; const cleanup = () => { state.media.removeEventListener('loadedmetadata', onReady); state.media.removeEventListener('error', onError); }; state.media.addEventListener('loadedmetadata', onReady, { once: true }); state.media.addEventListener('error', onError, { once: true }); state.media.crossOrigin = 'anonymous'; state.media.src = file.url; state.media.load(); });
+      if (loadId !== state.loadId) return;
+      state.streaming = true; state.media.volume = state.volume; state.media.muted = false; state.name = file.name; state.offset = Math.max(0, Math.min(audioDuration(), Number(restorePosition) || 0));
+      updateLoadProgress('Large audio ready', 100);
+    } else {
+      await ensureAudio(false);
+      if (loadId !== state.loadId) return;
+      const bytes = new Uint8Array(totalBytes); const chunkSize = 4 * 1024 * 1024;
+      for (let offset = 0; offset < totalBytes; offset += chunkSize) {
+        if (loadId !== state.loadId) return;
+        const chunk = await window.mto.readAudioChunk(file.path, offset, Math.min(chunkSize, totalBytes - offset));
+        const partSource = chunk instanceof Uint8Array ? chunk : (chunk?.data || chunk);
+        const part = partSource instanceof Uint8Array ? partSource : new Uint8Array(partSource);
+        if (!part.byteLength) throw new Error('Audio file could not be read');
+        bytes.set(part, offset); updateLoadProgress('Reading audio…', ((offset + part.byteLength) / totalBytes) * 65);
+      }
+      if (loadId !== state.loadId) return;
+      updateLoadProgress('Decoding audio…', null);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const copy = bytes.buffer; const decoded = await state.context.decodeAudioData(copy);
+      if (loadId !== state.loadId) return;
+      updateLoadProgress('Finalizing audio…', 100);
+      state.buffer = decoded; state.name = file.name; state.offset = Math.max(0, Math.min(state.buffer.duration, Number(restorePosition) || 0));
+      state.waveformPeaks = getBufferWaveformPeaks(decoded);
+    }
+    const duration = audioDuration();
+    state.audioPath = file.path;
+    state.bookmarks = loadBookmarks(file.path, duration);
+    loadTranscription(file.path);
+    $('#track-title').textContent = file.name.replace(/\.(mp3|wav)$/i, ''); $('#track-meta').textContent = `${file.name.toLowerCase().endsWith('.wav') ? 'WAV' : 'MP3'} · ${formatTime(duration)}${state.buffer ? ` · ${Math.round(state.buffer.sampleRate / 1000)} kHz` : ' · streaming'}`;
+    $('#duration').textContent = formatTime(duration); $('#end-time').textContent = formatTime(duration); $('#mid-time').textContent = formatTime(duration / 2);
     $('#track-state-label').textContent = restoredFile ? 'PAUSED' : 'TRACK LOADED'; $('#track-state-dot').classList.remove('playing');
-    $('#recent-title').textContent = $('#track-title').textContent; $('#recent-subtitle').textContent = `${formatTime(state.buffer.duration)} · Just added`; $('.status-pill span').textContent = 'TRACK LOADED'; $('.status-pill i').classList.add('ready');
-    drawWaveform(); drawProgress(); savePlaybackPosition(true);
+    $('#recent-title').textContent = $('#track-title').textContent; $('#recent-subtitle').textContent = `${formatTime(duration)} · Just added`; $('.status-pill span').textContent = 'TRACK LOADED'; $('.status-pill i').classList.add('ready');
+    renderBookmarks(); drawWaveform(); drawProgress(); savePlaybackPosition(true);
+    if (isLargeFile) analyzeStreamingWaveform(file.url, duration, loadId);
     if (!isRestore) {
       try { await play(true); }
       catch (error) { console.error(error); toast('Audio loaded. Press Play to start playback.'); }
     }
   } catch (error) { if (loadId === state.loadId) { console.error(error); toast('Could not open or play this audio file.'); } }
-  finally { if (loadId === state.loadId) { state.loading = false; state.restoring = false; } }
+  finally { if (loadId === state.loadId) { state.loading = false; state.restoring = false; finishLoadProgress(); } }
 }
 async function restoreLastAudio() {
   try {
@@ -226,6 +474,11 @@ trackHeader.append($('#open-track'));
 playerControlPanel.append(playerCard.querySelector('.wave-wrap'), playerCard.querySelector('.transport'));
 taskbar.append(trackHeader, playerControlPanel);
 $('#side-player-controls').append($('.controls-row'));
+const bookmarkRow = document.createElement('div');
+bookmarkRow.className = 'wave-bookmark-row';
+bookmarkRow.innerHTML = '<button class="bookmark-add" id="bookmark-add" type="button" disabled>+ Bookmark</button><div class="wave-bookmarks" id="wave-bookmarks" aria-label="Audio bookmarks"></div>';
+playerControlPanel.querySelector('.wave-wrap').append(bookmarkRow);
+$('#bookmark-add').addEventListener('click', addBookmark);
 $('.breadcrumb strong').textContent = 'TRANSCRIPTION';
 paintDials(); drawWaveform(); loadSettings(); loadTranscription();
 transcriptionText.addEventListener('input', saveTranscription);
@@ -247,13 +500,13 @@ $('#clear-transcription').onclick = () => { if (!transcriptionText.value || wind
 $('#open-track').onclick = () => openAudio(); $('#play-btn').onclick = togglePlay;
 $('#stop-btn').onclick = () => { pause(); state.offset = 0; savePlaybackPosition(true); drawWaveform(); drawProgress(); };
 $('#jump-back').onclick = () => seekTo(currentTime() - 3); $('#jump-forward').onclick = () => seekTo(currentTime() + 3);
-$('#loop-btn').onclick = () => { state.loop = !state.loop; $('#loop-btn').classList.toggle('selected', state.loop); if (state.source) state.source.loop = state.loop; };
-$('#volume').oninput = (event) => { state.volume = Number(event.target.value); $('#volume-value').textContent = `${Math.round(state.volume * 100)}%`; if (state.clarityNodes?.gain) state.clarityNodes.gain.gain.setTargetAtTime(state.volume, state.context.currentTime, 0.02); };
+$('#loop-btn').onclick = () => { state.loop = !state.loop; $('#loop-btn').classList.toggle('selected', state.loop); if (state.source) state.source.loop = state.loop; if (state.media) state.media.loop = state.loop; };
+$('#volume').oninput = (event) => { state.volume = Number(event.target.value); $('#volume-value').textContent = `${Math.round(state.volume * 100)}%`; if (state.media) state.media.volume = state.streaming && state.mediaSource ? 1 : state.volume; if (state.clarityNodes?.gain) state.clarityNodes.gain.gain.setTargetAtTime(state.volume, state.context.currentTime, 0.02); };
 $('#clarity-toggle').onclick = () => updateClarity();
 document.querySelectorAll('[data-reset]').forEach((button) => button.onclick = () => button.dataset.reset === 'speed' ? setSpeed(1) : setPitch(0));
 function wireWaveSeeking(hit, hover) {
-  hit.addEventListener('pointerdown', (event) => { if (!state.buffer) return; scrubbing = true; scrubWasPlaying = state.playing; if (scrubWasPlaying) pause(); hit.setPointerCapture(event.pointerId); const rect = hit.getBoundingClientRect(); state.offset = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * state.buffer.duration; drawWaveform(); drawProgress(); });
-  hit.addEventListener('pointermove', (event) => { const rect = hit.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)); hover.style.left = `${ratio * 100}%`; if (scrubbing && state.buffer) { state.offset = ratio * state.buffer.duration; drawWaveform(); drawProgress(); } });
+  hit.addEventListener('pointerdown', (event) => { if (!hasAudio()) return; scrubbing = true; scrubWasPlaying = state.playing; if (scrubWasPlaying) pause(); hit.setPointerCapture(event.pointerId); const rect = hit.getBoundingClientRect(); state.offset = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * audioDuration(); if (state.streaming) state.media.currentTime = state.offset; drawWaveform(); drawProgress(); });
+  hit.addEventListener('pointermove', (event) => { const rect = hit.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)); hover.style.left = `${ratio * 100}%`; if (scrubbing && hasAudio()) { state.offset = ratio * audioDuration(); if (state.streaming) state.media.currentTime = state.offset; drawWaveform(); drawProgress(); } });
   hit.addEventListener('pointerup', async () => { if (!scrubbing) return; scrubbing = false; savePlaybackPosition(true); if (scrubWasPlaying) await togglePlay(); scrubWasPlaying = false; });
   hit.addEventListener('pointercancel', () => { scrubbing = false; savePlaybackPosition(true); scrubWasPlaying = false; });
 }
