@@ -19,6 +19,16 @@ npm run pack
 
 Electron 44.7.0 is pinned in `package.json`. Electron Builder targets Windows NSIS, macOS DMG, and Linux AppImage.
 
+## Publish a Windows release
+
+Update the package version, commit and push the changes to `main`, then run:
+
+```sh
+npm run release
+```
+
+This creates and pushes the matching `v<version>` tag. GitHub Actions builds and publishes the Windows installer and updater metadata; do not run `publish:win` locally for the same release.
+
 ## Controls
 
 - Drag the tempo and pitch dials, use the `−` / `+` fine controls, or scroll over a dial.

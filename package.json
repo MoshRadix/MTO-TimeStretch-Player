@@ -10,7 +10,7 @@
     "build": "vite build",
     "pack": "npm run build && electron-builder",
     "publish:win": "npm run build && electron-builder --win nsis --publish always",
-    "release": "npm run publish:win"
+    "release": "node scripts/release.cjs"
   },
   "devDependencies": {
     "@soundtouchjs/audio-worklet": "^2.1.1",
