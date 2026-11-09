@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog, globalShortcut, ipcMain, protocol } = require('electron');
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, protocol, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const { createReadStream } = require('node:fs');
@@ -10,6 +11,11 @@ let lastAudioPath = null;
 let selectedAudioId = null;
 let savedPosition = 0;
 let playbackWrite = Promise.resolve();
+let playbackActive = false;
+let updateDownloaded = false;
+let installingUpdate = false;
+let updateState = { status: 'idle' };
+let updateChecksStarted = false;
 const defaults = { playPause: 'Alt+Space', seekBackward: 'Alt+Left', seekForward: 'Alt+Right', speedDown: 'Alt+Down', speedUp: 'Alt+Up', pitchDown: 'Ctrl+Alt+Left', pitchUp: 'Ctrl+Alt+Right' };
 let shortcuts = { ...defaults };
 
@@ -51,6 +57,43 @@ function registerShortcuts(next = shortcuts) {
   for (const [key, accelerator] of Object.entries(shortcuts)) {
     try { if (accelerator) globalShortcut.register(accelerator, () => mainWindow?.webContents.send('global-action', actions[key])); } catch {}
   }
+}
+function setUpdateState(status, details = {}) {
+  updateState = { status, ...details };
+  mainWindow?.webContents.send('updates:status', updateState);
+}
+function installUpdateWhenIdle() {
+  if (!app.isPackaged || !updateDownloaded || playbackActive || installingUpdate) return;
+  installingUpdate = true;
+  setUpdateState('installing');
+  autoUpdater.quitAndInstall(true, true);
+}
+function initializeAutoUpdates() {
+  if (!app.isPackaged || updateChecksStarted) return;
+  updateChecksStarted = true;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.on('checking-for-update', () => setUpdateState('checking'));
+  autoUpdater.on('update-available', (info) => setUpdateState('downloading', { version: info.version, percent: 0 }));
+  autoUpdater.on('update-not-available', () => setUpdateState('idle'));
+  autoUpdater.on('download-progress', (progress) => setUpdateState('downloading', { percent: Math.floor(progress.percent) }));
+  autoUpdater.on('update-downloaded', (info) => {
+    updateDownloaded = true;
+    setUpdateState('downloaded', { version: info.version });
+    installUpdateWhenIdle();
+  });
+  autoUpdater.on('error', (error) => {
+    console.error('Could not update the application:', error);
+    setUpdateState('error');
+  });
+  const checkForUpdates = () => autoUpdater.checkForUpdates().catch((error) => {
+    console.error('Could not check for application updates:', error);
+    setUpdateState('error');
+  });
+  checkForUpdates();
+  const updateCheckTimer = setInterval(checkForUpdates, 4 * 60 * 60 * 1000);
+  updateCheckTimer.unref();
 }
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1440, height: 980, minWidth: 1040, minHeight: 720, backgroundColor: '#0c1014', title: 'MTO TimeStretch', icon: path.join(__dirname, app.isPackaged ? '../web-dist/mto-icon.png' : '../public/mto-icon.png'), autoHideMenuBar: true,
@@ -95,6 +138,14 @@ ipcMain.handle('settings:save', async (_event, value) => {
   registerShortcuts(shortcuts);
   return shortcuts;
 });
+ipcMain.on('playback:active', (_event, active) => {
+  if (typeof active !== 'boolean') return;
+  playbackActive = active;
+  if (!playbackActive) installUpdateWhenIdle();
+});
+ipcMain.handle('app:get-version', () => app.getVersion());
+ipcMain.handle('app:open-developer-profile', () => shell.openExternal('https://github.com/MoshRadix'));
+ipcMain.handle('updates:get-state', () => updateState);
 app.whenReady().then(async () => {
   protocol.handle('mto-audio', async (request) => {
     try {
@@ -140,7 +191,7 @@ app.whenReady().then(async () => {
       return new Response(null, { status: error.code === 'ENOENT' ? 404 : 500 });
     }
   });
-  await Promise.all([loadSettings(), loadPlaybackState()]); createWindow(); registerShortcuts(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  await Promise.all([loadSettings(), loadPlaybackState()]); createWindow(); registerShortcuts(); initializeAutoUpdates(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 let waitingForPlaybackSave = false;
 app.on('before-quit', (event) => {

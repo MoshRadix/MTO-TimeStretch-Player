@@ -2,7 +2,6 @@ class WaveformProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.peak = 0;
-    this.frames = 0;
   }
 
   process(inputs, outputs) {
@@ -19,11 +18,8 @@ class WaveformProcessor extends AudioWorkletProcessor {
       for (const channel of output) channel.fill(0);
     }
 
-    if (++this.frames >= 32) {
-      this.port.postMessage(this.peak);
-      this.peak = 0;
-      this.frames = 0;
-    }
+    this.port.postMessage(this.peak);
+    this.peak = 0;
 
     return true;
   }

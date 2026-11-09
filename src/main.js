@@ -2,6 +2,7 @@ import { SoundTouchNode } from '@soundtouchjs/audio-worklet';
 import soundTouchProcessorUrl from '@soundtouchjs/audio-worklet/processor?url';
 import waveformProcessorUrl from './waveform-processor.js?url&no-inline';
 import './style.css';
+import './polish.css';
 
 const $ = (selector) => document.querySelector(selector);
 const state = { buffer: null, waveformPeaks: null, waveformAnalysis: null, bookmarks: [], audioPath: '', name: '', context: null, audioSetup: null, loading: false, loadId: 0, restoring: false, source: null, media: $('#audio-stream'), mediaSource: null, streaming: false, stretch: null, clarityNodes: null, clarity: false, playing: false, loop: false, offset: 0, startedAt: 0, speed: 1, pitch: 0, volume: 0.8, shortcuts: {} };
@@ -157,8 +158,8 @@ function addBookmark() {
 }
 
 function drawWaveform() {
-  drawWaveformOn(waveform, waveCtx, $('#wave-empty'), '#35434a');
-  drawWaveformOn(waveformProgress, waveProgressCtx, $('#wave-empty'), '#bd43f5');
+  drawWaveformOn(waveform, waveCtx, $('#wave-empty'), '#75578f');
+  drawWaveformOn(waveformProgress, waveProgressCtx, $('#wave-empty'), '#d19aff');
 }
 function drawWaveformOn(canvas, ctx, empty, barColor) {
   const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
@@ -166,15 +167,39 @@ function drawWaveformOn(canvas, ctx, empty, barColor) {
   const width = rect.width, height = rect.height; ctx.clearRect(0, 0, width, height);
   if (!width || !height) { empty.classList.remove('hidden'); return; }
   if (!state.buffer && !state.streaming) { empty.classList.remove('hidden'); return; }
-  empty.classList.add('hidden');
-  const barCount = Math.max(1, Math.floor(width / 4)); const mid = height / 2;
   const peaks = state.waveformPeaks;
+  const hasSamples = Boolean(peaks?.some((peak) => peak > 0.0001));
+  if (!state.buffer && !hasSamples) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  const barCount = Math.max(1, Math.min(peaks?.length || 1, Math.floor(width / 3.5)));
+  const mid = Math.floor(height / 2);
+  ctx.fillStyle = 'rgba(190, 160, 216, 0.12)';
+  ctx.fillRect(0, mid, width, 1);
   if (!peaks) return;
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  if (barColor === '#d19aff') {
+    gradient.addColorStop(0, '#bd82e8');
+    gradient.addColorStop(0.5, '#e1b8ff');
+    gradient.addColorStop(1, '#a969d1');
+  } else {
+    gradient.addColorStop(0, '#684d80');
+    gradient.addColorStop(0.5, '#9776ad');
+    gradient.addColorStop(1, '#574168');
+  }
+  ctx.fillStyle = gradient;
+  ctx.globalAlpha = barColor === '#d19aff' ? 0.98 : 0.9;
+  const barWidth = Math.min(2.5, width / barCount * 0.66);
   for (let i = 0; i < barCount; i++) {
     const peak = peaks[Math.min(peaks.length - 1, Math.floor(i * peaks.length / barCount))];
-    const barHeight = Math.max(1, Math.min(height - 10, Math.min(1, peak * 2.5) * (height - 10))); const x = (i / barCount) * width;
-    ctx.fillStyle = barColor; ctx.globalAlpha = barColor === '#bd43f5' ? 0.96 : 0.84;
-    ctx.beginPath(); ctx.roundRect(x, mid - barHeight / 2, 2, barHeight, Math.min(2, barHeight / 2)); ctx.fill();
+    if (peak <= 0.0001) continue;
+    const barHeight = Math.max(2, Math.min(height - 12, Math.sqrt(Math.min(1, peak)) * (height - 12)));
+    const x = (i / barCount) * width + (width / barCount - barWidth) / 2;
+    ctx.beginPath();
+    ctx.roundRect(x, mid - barHeight / 2, barWidth, barHeight, barWidth / 2);
+    ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
@@ -198,6 +223,7 @@ function stopWaveformAnalysis() {
   const analysis = state.waveformAnalysis;
   if (!analysis) return;
   state.waveformAnalysis = null;
+  $('#wave-hit').classList.remove('wave-analyzing');
   analysis.audio.pause();
   analysis.audio.removeAttribute('src');
   analysis.audio.load();
@@ -220,11 +246,15 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
   const context = new AudioContext();
   const source = context.createMediaElementSource(audio);
   const peaks = new Float32Array(waveformPeakCount);
-  let previousTime = 0;
+  let previousTime = null;
   let lastDraw = 0;
   const analysis = { audio, context, source, processor: null, onEnded: null, onError: null };
   state.waveformPeaks = peaks;
   state.waveformAnalysis = analysis;
+  $('#wave-hit').classList.add('wave-analyzing');
+  $('#wave-empty').querySelector('b').textContent = 'Building your waveform';
+  $('#wave-empty').querySelector('small').textContent = 'Scanning the audio progressively';
+  drawWaveform();
   try {
     await context.audioWorklet.addModule(waveformProcessorUrl);
     if (state.waveformAnalysis !== analysis || state.loadId !== loadId) {
@@ -244,14 +274,14 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
       if (state.waveformAnalysis !== analysis || state.loadId !== loadId) return;
       const currentTime = Math.min(duration, audio.currentTime);
       if (!Number.isFinite(currentTime)) return;
-      const peak = event.data;
-      if (currentTime > previousTime) {
-        const firstBin = Math.min(peaks.length - 1, Math.floor(previousTime / duration * peaks.length));
+      const peak = Number(event.data);
+      if (Number.isFinite(peak) && peak > 0) {
+        const firstBin = Math.min(peaks.length - 1, Math.floor((previousTime ?? currentTime) / duration * peaks.length));
         const lastBin = Math.min(peaks.length - 1, Math.floor(currentTime / duration * peaks.length));
         for (let bin = firstBin; bin <= lastBin; bin++) peaks[bin] = Math.max(peaks[bin], peak);
-        previousTime = currentTime;
       }
-      if (performance.now() - lastDraw >= 200) {
+      previousTime = currentTime;
+      if (performance.now() - lastDraw >= 100) {
         lastDraw = performance.now();
         drawWaveform();
         $('#track-meta').textContent = `${$('#track-meta').textContent.replace(/ · waveform \d+%$/, '')} · waveform ${Math.floor(currentTime / duration * 100)}%`;
@@ -260,17 +290,24 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
     analysis.onEnded = () => {
       if (state.waveformAnalysis !== analysis) return;
       stopWaveformAnalysis();
+      if (!peaks.some((peak) => peak > 0.0001)) {
+        $('#wave-empty').querySelector('b').textContent = 'Waveform unavailable';
+        $('#wave-empty').querySelector('small').textContent = 'The audio is ready to play';
+      }
       drawWaveform();
       $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
     };
     analysis.onError = () => {
       console.error('Could not analyze the streamed audio waveform:', audio.error);
       if (state.waveformAnalysis === analysis) stopWaveformAnalysis();
+      $('#wave-empty').querySelector('b').textContent = 'Waveform unavailable';
+      $('#wave-empty').querySelector('small').textContent = 'The audio is ready to play';
+      drawWaveform();
       $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
     };
     audio.addEventListener('ended', analysis.onEnded, { once: true });
     audio.addEventListener('error', analysis.onError, { once: true });
-    audio.playbackRate = 8;
+    audio.playbackRate = 16;
     audio.preservesPitch = false;
     audio.src = url;
     audio.load();
@@ -279,7 +316,12 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
   } catch (error) {
     if (state.waveformAnalysis === analysis) stopWaveformAnalysis();
     console.error('Could not start waveform analysis:', error);
-    $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
+    if (state.loadId === loadId) {
+      $('#wave-empty').querySelector('b').textContent = 'Waveform unavailable';
+      $('#wave-empty').querySelector('small').textContent = 'The audio is ready to play';
+      drawWaveform();
+      $('#track-meta').textContent = $('#track-meta').textContent.replace(/ · waveform \d+%$/, '');
+    }
   }
 }
 
@@ -357,20 +399,20 @@ function createPlaybackGraph() {
     if (state.stretch) { state.stretch.playbackRate.value = state.speed; state.stretch.pitchSemitones.value = state.pitch; }
   } catch (error) { stopSource(); throw error; }
 }
-function handleEnded() { if (state.playing && !state.loop) { state.playing = false; state.offset = 0; savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'TRACK ENDED'; $('#track-state-dot').classList.remove('playing'); drawProgress(); drawWaveform(); } }
+function handleEnded() { if (state.playing && !state.loop) { state.playing = false; state.offset = 0; savePlaybackPosition(true); window.mto.setPlaybackActive(false); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'TRACK ENDED'; $('#track-state-dot').classList.remove('playing'); drawProgress(); drawWaveform(); } }
 async function play(allowDuringLoad = false) {
   if (state.loading && !allowDuringLoad) return;
   if (!hasAudio()) { await openAudio(); return; }
   if (state.playing) return;
   await ensureAudio(); if (state.playing) return;
   if (state.offset >= audioDuration()) state.offset = 0;
-  try { createPlaybackGraph(); state.startedAt = state.context?.currentTime || 0; if (state.streaming) { state.media.currentTime = state.offset; state.media.onended = handleEnded; await state.media.play(); } else state.source.start(0, state.offset); state.playing = true; }
+  try { createPlaybackGraph(); state.startedAt = state.context?.currentTime || 0; if (state.streaming) { state.media.currentTime = state.offset; state.media.onended = handleEnded; await state.media.play(); } else state.source.start(0, state.offset); state.playing = true; window.mto.setPlaybackActive(true); }
   catch (error) { state.playing = false; stopSource(); throw error; }
   $('#play-symbol').textContent = '\u2016'; $('#play-btn').classList.add('is-playing'); $('#play-btn').title = 'Pause'; $('#play-btn').setAttribute('aria-label', 'Pause'); $('#track-state-label').textContent = 'NOW PLAYING'; $('#track-state-dot').classList.add('playing'); drawProgress();
 }
 function pause(savePosition = true) {
   if (!state.playing) return;
-  state.offset = currentTime(); state.playing = false; if (state.streaming) state.media.pause(); stopSource(); if (savePosition) savePlaybackPosition(true); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'PAUSED'; $('#track-state-dot').classList.remove('playing'); drawWaveform(); drawProgress();
+  state.offset = currentTime(); state.playing = false; if (state.streaming) state.media.pause(); stopSource(); if (savePosition) savePlaybackPosition(true); window.mto.setPlaybackActive(false); $('#play-symbol').textContent = '\u25B6'; $('#play-btn').classList.remove('is-playing'); $('#play-btn').title = 'Play'; $('#play-btn').setAttribute('aria-label', 'Play'); $('#track-state-label').textContent = 'PAUSED'; $('#track-state-dot').classList.remove('playing'); drawWaveform(); drawProgress();
 }
 async function togglePlay() { try { if (state.playing) pause(); else await play(); } catch (error) { console.error(error); toast('Playback could not start. Try reopening the audio file.'); } }
 async function seekTo(value) {
@@ -399,6 +441,9 @@ async function openAudio(restoredFile = null, restorePosition = 0) {
     const isLargeFile = totalBytes >= 64 * 1024 * 1024;
     stopWaveformAnalysis();
     state.waveformPeaks = null;
+    $('#wave-hit').classList.remove('wave-analyzing');
+    $('#wave-empty').querySelector('b').textContent = 'Your waveform will appear here';
+    $('#wave-empty').querySelector('small').textContent = 'Open an MP3 or WAV to get started';
     state.audioPath = '';
     state.bookmarks = [];
     renderBookmarks();
@@ -458,6 +503,8 @@ async function restoreLastAudio() {
 function keyCombo(event) { const bits = []; if (event.ctrlKey) bits.push('Ctrl'); if (event.altKey) bits.push('Alt'); if (event.shiftKey) bits.push('Shift'); if (event.metaKey) bits.push('Super'); let key = event.key; if (key === ' ') key = 'Space'; else if (key === 'ArrowUp') key = 'Up'; else if (key === 'ArrowDown') key = 'Down'; else if (key === 'ArrowLeft') key = 'Left'; else if (key === 'ArrowRight') key = 'Right'; else if (key.length === 1) key = key.toUpperCase(); if (!['Control', 'Alt', 'Shift', 'Meta'].includes(key)) bits.push(key); return bits.join('+'); }
 function showSettings() { $('#settings-overlay').classList.add('visible'); }
 function hideSettings() { $('#settings-overlay').classList.remove('visible'); recordingShortcut = null; }
+function showAbout() { $('#about-overlay').classList.add('visible'); $('#close-about').focus(); }
+function hideAbout() { $('#about-overlay').classList.remove('visible'); $('#open-about').focus(); }
 async function loadSettings() {
   state.shortcuts = await window.mto.getShortcuts();
   for (const input of document.querySelectorAll('[data-shortcut]')) input.value = state.shortcuts[input.dataset.shortcut] || '';
@@ -514,15 +561,32 @@ wireWaveSeeking($('#wave-hit'), $('#wave-hover'));
 window.addEventListener('resize', drawWaveform);
 $('#open-settings').onclick = $('#top-settings').onclick = showSettings; $('#close-settings').onclick = hideSettings;
 $('#settings-overlay').addEventListener('click', (event) => { if (event.target === $('#settings-overlay')) hideSettings(); });
+$('#open-about').onclick = showAbout; $('#close-about').onclick = hideAbout;
+$('#about-overlay').addEventListener('click', (event) => { if (event.target === $('#about-overlay')) hideAbout(); });
+$('#open-developer-profile').onclick = async () => { try { await window.mto.openDeveloperProfile(); } catch (error) { console.error('Could not open developer profile:', error); toast('Could not open the developer profile.'); } };
 document.querySelectorAll('[data-shortcut]').forEach((input) => { input.onclick = () => { recordingShortcut = input; input.classList.add('recording'); input.value = 'Press shortcut…'; $('#shortcut-message').textContent = `Recording ${input.parentElement.firstChild.textContent.trim()}`; }; });
 document.addEventListener('keydown', (event) => {
   if (recordingShortcut) { event.preventDefault(); const combo = keyCombo(event); if (!['Alt', 'Ctrl', 'Shift', 'Super'].includes(combo)) { recordingShortcut.value = combo; recordingShortcut.classList.remove('recording'); state.shortcuts[recordingShortcut.dataset.shortcut] = combo; recordingShortcut = null; $('#shortcut-message').textContent = 'Shortcut captured'; } return; }
-  if (event.target.matches('input, textarea, [contenteditable="true"]')) { if (event.key === 'Escape') hideSettings(); return; }
+  if (event.key === 'Escape') { hideSettings(); hideAbout(); return; }
+  if (event.target.matches('input, textarea, [contenteditable="true"]')) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   else if (event.key === 'ArrowLeft') seekTo(currentTime() - 3); else if (event.key === 'ArrowRight') seekTo(currentTime() + 3);
-  else if (event.key === 'Escape') hideSettings();
 });
 $('#save-settings').onclick = async () => { try { state.shortcuts = await window.mto.saveShortcuts(state.shortcuts); $('#shortcut-message').textContent = 'Shortcuts saved'; toast('Global shortcuts saved'); } catch { toast('Could not save shortcuts'); } };
+function showUpdateStatus(update, notify = false) {
+  const label = $('.status-pill span');
+  if (update.status === 'checking') label.textContent = 'CHECKING FOR UPDATES';
+  else if (update.status === 'downloading') label.textContent = `DOWNLOADING UPDATE ${update.percent ?? 0}%`;
+  else if (update.status === 'downloaded') {
+    label.textContent = 'UPDATE READY · INSTALLS WHEN PAUSED';
+    if (notify) toast(`Update ${update.version} downloaded. It will install when playback stops.`);
+  } else if (update.status === 'installing') label.textContent = 'INSTALLING UPDATE';
+  else if (update.status === 'error') label.textContent = 'UPDATE CHECK FAILED';
+  else label.textContent = state.playing ? 'NOW PLAYING' : hasAudio() ? 'TRACK LOADED' : 'READY TO LISTEN';
+}
+window.mto.onUpdateStatus((update) => showUpdateStatus(update, true));
+window.mto.getUpdateState().then((update) => showUpdateStatus(update)).catch((error) => console.error('Could not load update status:', error));
+window.mto.getVersion().then((version) => { $('#about-version').textContent = version; }).catch((error) => console.error('Could not read application version:', error));
 window.mto.onGlobalAction(doGlobalAction);
 window.addEventListener('beforeunload', () => savePlaybackPosition(true));
 restoreLastAudio();
