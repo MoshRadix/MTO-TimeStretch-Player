@@ -1,11 +1,12 @@
 import { SoundTouchNode } from '@soundtouchjs/audio-worklet';
 import soundTouchProcessorUrl from '@soundtouchjs/audio-worklet/processor?url';
 import waveformProcessorUrl from './waveform-processor.js?url&no-inline';
+import { loadWaveformCache, saveWaveformCache } from './waveform-cache.js';
 import './style.css';
 import './polish.css';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { buffer: null, waveformPeaks: null, waveformAnalysis: null, bookmarks: [], audioPath: '', name: '', context: null, audioSetup: null, loading: false, loadId: 0, restoring: false, source: null, media: $('#audio-stream'), mediaSource: null, streaming: false, stretch: null, clarityNodes: null, clarity: false, playing: false, loop: false, offset: 0, startedAt: 0, speed: 1, pitch: 0, volume: 0.8, shortcuts: {} };
+const state = { buffer: null, waveformPeaks: null, waveformAnalysis: null, waveformCacheWrite: Promise.resolve(), bookmarks: [], audioPath: '', name: '', context: null, audioSetup: null, loading: false, loadId: 0, restoring: false, source: null, media: $('#audio-stream'), mediaSource: null, streaming: false, stretch: null, clarityNodes: null, clarity: false, playing: false, loop: false, offset: 0, startedAt: 0, speed: 1, pitch: 0, volume: 0.8, shortcuts: {} };
 const waveform = $('#waveform');
 const waveCtx = waveform.getContext('2d');
 const waveformProgress = $('#waveform-progress');
@@ -72,6 +73,20 @@ function finishLoadProgress() { $('#load-progress').hidden = true; $('#load-prog
 function formatTime(time) { if (!Number.isFinite(time)) return '00:00'; const s = Math.max(0, Math.floor(time)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
 function audioDuration() { return state.buffer?.duration || state.media?.duration || 0; }
 function hasAudio() { return Boolean(state.buffer || (state.streaming && state.media?.src)); }
+function waveformCacheIdentity(file) { return JSON.stringify([file.path, file.size, Number(file.mtimeMs) || 0]); }
+async function readWaveformCache(file) {
+  try { return await loadWaveformCache(waveformCacheIdentity(file)); }
+  catch (error) { console.error('Could not load the saved waveform:', error); return null; }
+}
+function persistWaveform(key, peaks, progress, complete = false) {
+  if (!key || !peaks) return;
+  const snapshot = peaks.slice();
+  state.waveformCacheWrite = state.waveformCacheWrite
+    .catch((error) => console.error('Could not save the waveform:', error))
+    .then(() => saveWaveformCache(key, snapshot, progress, complete))
+    .catch((error) => console.error('Could not save the waveform:', error));
+  return state.waveformCacheWrite;
+}
 function currentTime() { if (!hasAudio()) return 0; return state.streaming ? (state.media?.currentTime || 0) : (state.playing ? Math.min(state.buffer.duration, state.offset + (state.context.currentTime - state.startedAt) * state.speed) : state.offset); }
 function savePlaybackPosition(force = false) {
   if (!hasAudio() || !window.mto?.savePlaybackPosition) return;
@@ -204,24 +219,46 @@ function drawWaveformOn(canvas, ctx, empty, barColor) {
   ctx.globalAlpha = 1;
 }
 
-function getBufferWaveformPeaks(buffer) {
-  const peaks = new Float32Array(waveformPeakCount);
+async function getBufferWaveformPeaks(buffer, file, cached, loadId) {
+  if (cached?.complete) return cached.peaks;
+  const peaks = cached?.peaks || new Float32Array(waveformPeakCount);
+  const cacheKey = waveformCacheIdentity(file);
   const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
-  for (let i = 0; i < peaks.length; i++) {
-    const start = Math.floor(i * buffer.length / peaks.length);
-    const end = Math.floor((i + 1) * buffer.length / peaks.length);
-    let peak = 0;
-    for (const channel of channels) {
-      for (let sample = start; sample < end; sample++) peak = Math.max(peak, Math.abs(channel[sample]));
+  const firstBin = cached ? Math.min(peaks.length, Math.floor(cached.progress * peaks.length)) : 0;
+  let lastSavedAt = performance.now();
+  let lastSavedProgress = firstBin / peaks.length;
+  for (let chunkStart = firstBin; chunkStart < peaks.length; chunkStart += 8) {
+    if (state.loadId !== loadId) return null;
+    const chunkEnd = Math.min(peaks.length, chunkStart + 8);
+    for (let i = chunkStart; i < chunkEnd; i++) {
+      const start = Math.floor(i * buffer.length / peaks.length);
+      const end = Math.floor((i + 1) * buffer.length / peaks.length);
+      let peak = 0;
+      for (const channel of channels) {
+        for (let sample = start; sample < end; sample++) peak = Math.max(peak, Math.abs(channel[sample]));
+      }
+      peaks[i] = peak;
     }
-    peaks[i] = peak;
+    const progress = chunkEnd / peaks.length;
+    const now = performance.now();
+    updateLoadProgress('Building waveform…', 65 + progress * 35);
+    if (progress - lastSavedProgress >= 0.05 || now - lastSavedAt >= 2000) {
+      persistWaveform(cacheKey, peaks, progress);
+      lastSavedProgress = progress;
+      lastSavedAt = now;
+    }
+    await new Promise((resolve) => requestAnimationFrame(resolve));
   }
+  if (state.loadId !== loadId) return null;
+  await persistWaveform(cacheKey, peaks, 1, true);
   return peaks;
 }
 
 function stopWaveformAnalysis() {
   const analysis = state.waveformAnalysis;
   if (!analysis) return;
+  const progress = analysis.progress || 0;
+  if (!analysis.completed) persistWaveform(analysis.cacheKey, analysis.peaks, progress);
   state.waveformAnalysis = null;
   $('#wave-hit').classList.remove('wave-analyzing');
   analysis.audio.pause();
@@ -238,17 +275,18 @@ function stopWaveformAnalysis() {
   analysis.context.close().catch((error) => console.error('Could not close waveform analyzer:', error));
 }
 
-async function analyzeStreamingWaveform(url, duration, loadId) {
+async function analyzeStreamingWaveform(url, duration, loadId, file, cached) {
   stopWaveformAnalysis();
   const audio = new Audio();
   audio.preload = 'auto';
   audio.crossOrigin = 'anonymous';
   const context = new AudioContext();
   const source = context.createMediaElementSource(audio);
-  const peaks = new Float32Array(waveformPeakCount);
-  let previousTime = null;
+  const peaks = cached?.peaks || new Float32Array(waveformPeakCount);
+  const startProgress = cached?.progress || 0;
+  let previousTime = startProgress * duration;
   let lastDraw = 0;
-  const analysis = { audio, context, source, processor: null, onEnded: null, onError: null };
+  const analysis = { audio, context, source, processor: null, onEnded: null, onError: null, duration, progress: startProgress, peaks, cacheKey: waveformCacheIdentity(file), lastCacheAt: performance.now(), lastCacheProgress: startProgress };
   state.waveformPeaks = peaks;
   state.waveformAnalysis = analysis;
   $('#wave-hit').classList.add('wave-analyzing');
@@ -276,20 +314,31 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
       if (!Number.isFinite(currentTime)) return;
       const peak = Number(event.data);
       if (Number.isFinite(peak) && peak > 0) {
-        const firstBin = Math.min(peaks.length - 1, Math.floor((previousTime ?? currentTime) / duration * peaks.length));
+        const firstBin = Math.min(peaks.length - 1, Math.floor(previousTime / duration * peaks.length));
         const lastBin = Math.min(peaks.length - 1, Math.floor(currentTime / duration * peaks.length));
         for (let bin = firstBin; bin <= lastBin; bin++) peaks[bin] = Math.max(peaks[bin], peak);
       }
       previousTime = currentTime;
+      analysis.progress = Math.max(analysis.progress, currentTime / duration);
+      if (analysis.progress - analysis.lastCacheProgress >= 0.02 || performance.now() - analysis.lastCacheAt >= 2000) {
+        persistWaveform(analysis.cacheKey, peaks, analysis.progress);
+        analysis.lastCacheProgress = analysis.progress;
+        analysis.lastCacheAt = performance.now();
+      }
       if (performance.now() - lastDraw >= 100) {
         lastDraw = performance.now();
         drawWaveform();
         $('#track-meta').textContent = `${$('#track-meta').textContent.replace(/ · waveform \d+%$/, '')} · waveform ${Math.floor(currentTime / duration * 100)}%`;
       }
     };
-    analysis.onEnded = () => {
+    analysis.onEnded = async () => {
       if (state.waveformAnalysis !== analysis) return;
+      analysis.progress = 1;
+      analysis.completed = true;
+      const saved = persistWaveform(analysis.cacheKey, peaks, 1, true);
       stopWaveformAnalysis();
+      await saved;
+      if (state.loadId !== loadId) return;
       if (!peaks.some((peak) => peak > 0.0001)) {
         $('#wave-empty').querySelector('b').textContent = 'Waveform unavailable';
         $('#wave-empty').querySelector('small').textContent = 'The audio is ready to play';
@@ -312,6 +361,16 @@ async function analyzeStreamingWaveform(url, duration, loadId) {
     audio.src = url;
     audio.load();
     await context.resume();
+    if (audio.readyState < HTMLMediaElement.HAVE_METADATA) {
+      await new Promise((resolve, reject) => {
+        audio.addEventListener('loadedmetadata', resolve, { once: true });
+        audio.addEventListener('error', () => reject(new Error('Audio metadata could not be loaded')), { once: true });
+      });
+    }
+    if (startProgress > 0) {
+      audio.currentTime = Math.min(duration, startProgress * duration);
+      previousTime = audio.currentTime;
+    }
     await audio.play();
   } catch (error) {
     if (state.waveformAnalysis === analysis) stopWaveformAnalysis();
@@ -439,8 +498,10 @@ async function openAudio(restoredFile = null, restorePosition = 0) {
     const totalBytes = Number(file.size);
     if (!Number.isFinite(totalBytes) || totalBytes <= 0) throw new Error('Audio file has no readable data');
     const isLargeFile = totalBytes >= 64 * 1024 * 1024;
+    const cachedWaveform = await readWaveformCache(file);
+    if (loadId !== state.loadId) return;
     stopWaveformAnalysis();
-    state.waveformPeaks = null;
+    state.waveformPeaks = cachedWaveform?.peaks || null;
     $('#wave-hit').classList.remove('wave-analyzing');
     $('#wave-empty').querySelector('b').textContent = 'Your waveform will appear here';
     $('#wave-empty').querySelector('small').textContent = 'Open an MP3 or WAV to get started';
@@ -472,9 +533,11 @@ async function openAudio(restoredFile = null, restorePosition = 0) {
       await new Promise((resolve) => requestAnimationFrame(resolve));
       const copy = bytes.buffer; const decoded = await state.context.decodeAudioData(copy);
       if (loadId !== state.loadId) return;
-      updateLoadProgress('Finalizing audio…', 100);
+      updateLoadProgress('Finalizing audio…', 65);
       state.buffer = decoded; state.name = file.name; state.offset = Math.max(0, Math.min(state.buffer.duration, Number(restorePosition) || 0));
-      state.waveformPeaks = getBufferWaveformPeaks(decoded);
+      state.waveformPeaks = await getBufferWaveformPeaks(decoded, file, cachedWaveform, loadId);
+      if (loadId !== state.loadId) return;
+      updateLoadProgress('Waveform ready', 100);
     }
     const duration = audioDuration();
     state.audioPath = file.path;
@@ -485,7 +548,7 @@ async function openAudio(restoredFile = null, restorePosition = 0) {
     $('#track-state-label').textContent = restoredFile ? 'PAUSED' : 'TRACK LOADED'; $('#track-state-dot').classList.remove('playing');
     $('#recent-title').textContent = $('#track-title').textContent; $('#recent-subtitle').textContent = `${formatTime(duration)} · Just added`; $('.status-pill span').textContent = 'TRACK LOADED'; $('.status-pill i').classList.add('ready');
     renderBookmarks(); drawWaveform(); drawProgress(); savePlaybackPosition(true);
-    if (isLargeFile) analyzeStreamingWaveform(file.url, duration, loadId);
+    if (isLargeFile && !cachedWaveform?.complete) analyzeStreamingWaveform(file.url, duration, loadId, file, cachedWaveform);
     if (!isRestore) {
       try { await play(true); }
       catch (error) { console.error(error); toast('Audio loaded. Press Play to start playback.'); }

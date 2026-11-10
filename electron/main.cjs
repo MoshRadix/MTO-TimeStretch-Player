@@ -108,7 +108,7 @@ ipcMain.handle('audio:open', async () => {
   const filePath = result.filePaths[0];
   lastAudioPath = filePath; savedPosition = 0; savePlaybackState(0);
   const stat = await fs.stat(filePath);
-  return { name: path.basename(filePath), path: filePath, url: audioUrl(), size: stat.size };
+  return { name: path.basename(filePath), path: filePath, url: audioUrl(), size: stat.size, mtimeMs: stat.mtimeMs };
 });
 ipcMain.handle('audio:restore', async () => {
   if (!lastAudioPath) return null;
@@ -116,7 +116,7 @@ ipcMain.handle('audio:restore', async () => {
     const filePath = lastAudioPath;
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) return null;
-    return { name: path.basename(filePath), path: filePath, url: audioUrl(), size: stat.size, position: savedPosition };
+    return { name: path.basename(filePath), path: filePath, url: audioUrl(), size: stat.size, mtimeMs: stat.mtimeMs, position: savedPosition };
   } catch { lastAudioPath = null; savedPosition = 0; return null; }
 });
 ipcMain.handle('audio:read-chunk', async (_event, { filePath, offset, length }) => {

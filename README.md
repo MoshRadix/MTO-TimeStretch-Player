@@ -36,4 +36,4 @@ This creates and pushes the matching `v<version>` tag. GitHub Actions builds and
 - Enable Voice Clarity for a speech presence filter and gentle compression.
 - Open Settings to record configurable global shortcuts. Defaults are `Alt+Space` for play/pause, `Alt+Up/Down` for tempo, and `Alt+Left/Right` for pitch.
 
-Tempo and pitch processing run through the SoundTouchJS AudioWorklet. The clarity switch adds a high-pass filter, presence EQ, and compression.
+Tempo and pitch processing run through the SoundTouchJS AudioWorklet. The clarity switch adds a high-pass filter, presence EQ, and compression. Waveforms are cached on this device and partial waveform analysis is resumed when a track is reopened; the cache refreshes automatically if the audio file changes.
